@@ -5,15 +5,20 @@ from datetime import datetime, timedelta
 import re
 import os
 
+# --- 頁面配置 ---
 st.set_page_config(page_title="誠品智慧排班系統", layout="wide")
 
+# --- 本地資料資料庫邏輯 ---
 SAVE_FILE = "staff_database.csv"
 
 def load_data():
     if os.path.exists(SAVE_FILE):
-        try: return pd.read_csv(SAVE_FILE, dtype={"員編": str, "分機": str})
-        except: return get_default_df()
-    return get_default_df()
+        try:
+            return pd.read_csv(SAVE_FILE, dtype={"員編": str, "分機": str})
+        except:
+            return get_default_df()
+    else:
+        return get_default_df()
 
 def get_default_df():
     return pd.DataFrame([
@@ -32,13 +37,51 @@ def get_default_df():
 if 'staff_df' not in st.session_state:
     st.session_state.staff_df = load_data()
 
-st.markdown("<style>html, body, [class*='css'] { font-size: 16pt !important; }[data-testid='stDataEditor'] div { font-size: 16pt !important; color: #000000 !important; }th { background-color: #f0f2f6 !important; color: #000000 !important; font-weight: bold !important; }.stButton>button { font-size: 18pt !important; font-weight: bold; width: 100%; border-radius: 10px; height: 3em; }.rule-box { background-color: #f1f8e9; border-left: 5px solid #2e7d32; padding: 15px; border-radius: 5px; margin-bottom: 20px; }</style>", unsafe_allow_html=True)
+# --- CSS 樣式修正：設定全域 14pt，規則顏色為黑色 ---
+st.markdown("""
+    <style>
+    /* 全域字體設為 14pt */
+    html, body, [class*="css"] { font-size: 14pt !important; }
+    
+    /* 表格內的文字與編輯器 */
+    [data-testid="stDataEditor"] div { font-size: 14pt !important; color: #000000 !important; }
+    
+    /* 表頭顏色與字體 */
+    th { background-color: #f0f2f6 !important; color: #000000 !important; font-weight: bold !important; font-size: 14pt !important; }
+    
+    /* 按鈕大小微調 */
+    .stButton>button { font-size: 16pt !important; font-weight: bold; width: 100%; border-radius: 10px; height: 2.5em; }
+    
+    /* 規則看板樣式：背景淡綠，文字純黑 */
+    .rule-box { 
+        background-color: #f1f8e9; 
+        border-left: 5px solid #2e7d32; 
+        padding: 15px; 
+        border-radius: 5px; 
+        margin-bottom: 20px; 
+        color: #000000 !important; /* 確保規則文字為黑色 */
+    }
+    .rule-box h3, .rule-box p, .rule-box b {
+        color: #000000 !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
 st.title("🏬 誠品智慧排班系統")
 
+# --- 1. 排班規則說明 ---
 with st.container():
-    st.markdown('<div class="rule-box"><h3 style="margin-top:0;">📌 排班規則說明</h3><p style="font-size:14pt;">• <b>連四休一</b>：連續上班不可超過 4 天。<br>• <b>晚不接早</b>：晚班隔天禁接早班 A。<br>• <b>人力水位</b>：平日 4早3晚 / 假日 2早2晚。<br>• <b>月休門檻</b>：每人月休至少 9 天。</p></div>', unsafe_allow_html=True)
+    st.markdown("""
+    <div class="rule-box">
+        <h3 style='margin-top:0;'>📌 排班規則說明</h3>
+        <p>• <b>連四休一</b>：連續上班不可超過 4 天。<br>
+        • <b>晚不接早</b>：晚班 (B1/B2) 隔天禁止接早班 A。<br>
+        • <b>人力水位</b>：平日 4早3晚 / 假日 2早2晚。<br>
+        • <b>月休門檻</b>：每人月休(含補、年)至少 9 天。</p>
+    </div>
+    """, unsafe_allow_html=True)
 
+# --- 2. 參數與資料管理 ---
 st.sidebar.header("🗓️ 選擇月份")
 target_date = st.sidebar.date_input("年份與月份", datetime(2026, 3, 1))
 target_month = target_date.replace(day=1)
@@ -48,22 +91,32 @@ st.subheader("👥 人員資料管理")
 with st.form("staff_form"):
     edited_staff = st.data_editor(st.session_state.staff_df, num_rows="dynamic", use_container_width=True, key="main_editor")
     col1, col2 = st.columns(2)
-    with col1: save_btn = st.form_submit_button("💾 儲存名單")
-    with col2: clear_btn = st.form_submit_button("🧹 清空假別")
+    with col1:
+        save_btn = st.form_submit_button("💾 儲存人員資料")
+    with col2:
+        clear_btn = st.form_submit_button("🧹 清空所有假別")
 
     if save_btn:
         st.session_state.staff_df = edited_staff
         edited_staff.to_csv(SAVE_FILE, index=False)
-        st.success("✅ 已儲存")
+        st.success("✅ 資料已同步儲存")
+    
     if clear_btn:
-        for col in ["劃休(/)", "補休(補)", "年假(年)"]: edited_staff[col] = ""
+        for col in ["劃休(/)", "補休(補)", "年假(年)"]:
+            edited_staff[col] = ""
         st.session_state.staff_df = edited_staff
         edited_staff.to_csv(SAVE_FILE, index=False)
         st.rerun()
 
-def parse_days(s):
-    if pd.isna(s) or str(s).strip() == "": return []
-    return [int(m.group(1)) for p in str(s).replace('，',',').split(',') if (m := re.search(r'(\d+)$', p.strip()))]
+# --- 3. AI 解析與運算核心 ---
+def parse_days(input_str):
+    if pd.isna(input_str) or str(input_str).strip() == "": return []
+    parts = str(input_str).replace('，', ',').split(',')
+    days = []
+    for p in parts:
+        m = re.search(r'(\d+)$', p.strip())
+        if m: days.append(int(m.group(1)))
+    return days
 
 def generate_schedule(staff_df, start_date, days):
     model = cp_model.CpModel()
@@ -112,12 +165,13 @@ def generate_schedule(staff_df, start_date, days):
         return pd.DataFrame(res)
     return None
 
+# --- 4. 生成按鈕 ---
 st.markdown("---")
 if st.button("🚀 執行 AI 自動排班"):
     final_df = generate_schedule(st.session_state.staff_df, target_month, num_days)
     if final_df is not None:
-        st.success("✅ 成功！")
+        st.success("✅ 班表生成成功！")
         st.data_editor(final_df, use_container_width=True, height=550)
-        st.download_button("📥 下載 CSV", final_df.to_csv(index=False).encode('utf-8-sig'), "Schedule.csv")
+        st.download_button("📥 下載 CSV 班表", final_df.to_csv(index=False).encode('utf-8-sig'), "Schedule.csv")
     else:
-        st.error("🚨 無法生成。請檢查是否有人預約假別太多，或人力不足（平日需 7 人）。")
+        st.error("🚨 條件衝突，請確認假別預約是否過多。")
