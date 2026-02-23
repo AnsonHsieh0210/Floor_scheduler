@@ -67,7 +67,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-st.title("🏬 誠品智慧排班系統")
+st.title("🏬 智慧排班系統")
 
 # --- 1. 排班規則說明 ---
 with st.container():
@@ -175,4 +175,5 @@ if st.button("🚀 執行 AI 自動排班"):
         st.download_button("📥 下載 CSV 班表", final_df.to_csv(index=False).encode('utf-8-sig'), "Schedule.csv")
     else:
         st.error("🚨 條件衝突，請確認假別預約是否過多。")
+
 
