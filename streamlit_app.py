@@ -6,7 +6,7 @@ import re
 import os
 
 # --- 頁面配置 ---
-st.set_page_config(page_title="誠品智慧排班系統", layout="wide")
+st.set_page_config(page_title="智慧排班系統測試版", layout="wide")
 
 # --- 本地資料資料庫邏輯 ---
 SAVE_FILE = "staff_database.csv"
@@ -175,3 +175,4 @@ if st.button("🚀 執行 AI 自動排班"):
         st.download_button("📥 下載 CSV 班表", final_df.to_csv(index=False).encode('utf-8-sig'), "Schedule.csv")
     else:
         st.error("🚨 條件衝突，請確認假別預約是否過多。")
+
