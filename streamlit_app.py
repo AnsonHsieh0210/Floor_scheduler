@@ -60,13 +60,14 @@ st.markdown("""
 
 st.title("🏬 百貨櫃位智慧排班系統")
 
-# --- 1. 排班規則看板 ---
+# --- 1. 排班規則看板 (已移除優先權顯示) ---
 with st.container():
     st.markdown("""
     <div class="rule-box">
         <h3 style='margin-top:0;'>📌 系統排班規則</h3>
         <p>• <b>人力配置</b>：每日最低門檻為 <b>2 早班 (A) / 2 晚班 (B)</b>。<br>
-        • <b>優先權機制</b>：<b>洪O雯</b> 之假別為最高優先權（強制滿足）。<br>
+        • <b>休假規則</b>：每人預設排班 <b>21 天</b> (若請假過多則自動調整)。<br>
+        • <b>連上限制</b>：不可連續上班 5 天 (即連上 4 天後必須休假)。<br>
         • <b>診斷系統</b>：若排班失敗，系統會自動預先檢查人力是否不足。</p>
     </div>
     """, unsafe_allow_html=True)
@@ -150,30 +151,47 @@ def generate_schedule(staff_df, start_date, days):
     priority_penalties = []
     req_offs_record = {}
     
-    # 讀取每人的需求
     for _, row in staff_df.iterrows():
         n = row["姓名"]
         req_offs_record[n] = {"/": parse_days(row["劃休(/)"]), "補": parse_days(row["補休(補)"]), "年": parse_days(row["年假(年)"])}
         
-        # 優先權邏輯 (可依需求調整)
-        is_p1 = ("洪O雯" in n) # 第一優先 (絕對滿足)
-        is_p2 = ("潘O誼" in n) # 第二優先 (高權重)
+        # --- 1. 上班天數設定 (目標 21 天) ---
+        total_leaves = set(req_offs_record[n]["/"] + req_offs_record[n]["補"] + req_offs_record[n]["年"])
+        # 過濾掉超出當月範圍的日期
+        valid_leaves = len([d for d in total_leaves if 1 <= d <= days])
+        
+        work_days_var = sum(shifts[(n,d,1)] + shifts[(n,d,2)] for d in range(days))
+        
+        target = 21
+        max_possible = days - valid_leaves
+        
+        if max_possible < target:
+            # 若請假太多無法上滿 21 天，則強制設定為「能上的天數」
+            model.Add(work_days_var == max_possible)
+        else:
+            # 正常情況：至少上 21 天，最多給一點彈性到 23 天 (避免勞逸不均)
+            model.Add(work_days_var >= target)
+            model.Add(work_days_var <= target + 2)
+
+        # --- 2. 隱藏的優先權邏輯 (不顯示在介面上) ---
+        is_p1 = ("洪O雯" in n) # 第一優先
+        is_p2 = ("潘O誼" in n) # 第二優先
         
         for label, d_list in req_offs_record[n].items():
             for d in d_list:
                 if 1 <= d <= days:
                     d_idx = d - 1
                     if is_p1:
-                        # P1: 強制設定為休假 (s=0)
+                        # P1: 強制滿足
                         model.Add(shifts[(n, d_idx, 0)] == 1)
                     elif is_p2:
-                        # P2: 軟限制，權重 100
+                        # P2: 給予極高權重 (Soft Constraint)
                         pref = model.NewBoolVar(f'pref_p2_{n}_{d}')
                         model.Add(shifts[(n, d_idx, 0)] == 1).OnlyEnforceIf(pref)
                         model.Add(shifts[(n, d_idx, 0)] == 0).OnlyEnforceIf(pref.Not())
                         priority_penalties.append(pref * 100)
                     else:
-                        # 一般: 軟限制，權重 1
+                        # 一般: 普通權重
                         pref = model.NewBoolVar(f'pref_n_{d}')
                         model.Add(shifts[(n, d_idx, 0)] == 1).OnlyEnforceIf(pref)
                         model.Add(shifts[(n, d_idx, 0)] == 0).OnlyEnforceIf(pref.Not())
@@ -181,33 +199,30 @@ def generate_schedule(staff_df, start_date, days):
 
     # --- 硬性限制條件 ---
     for d in range(days):
-        # 1. 每人每天只能有一種狀態
+        # 每日每人只能一種狀態
         for n in names: 
             model.Add(sum(shifts[(n, d, s)] for s in [0,1,2]) == 1)
         
-        # 2. 每日人力需求 (2早 2晚)
+        # 每日人力需求 (2早 2晚)
         model.Add(sum(shifts[(n, d, 1)] for n in names) >= 2) 
         model.Add(sum(shifts[(n, d, 2)] for n in names) >= 2) 
 
     for n in names:
-        # 3. 禁止「晚接早」 (No Clopen: 昨天晚班(2) + 今天早班(1) <= 1)
+        # 禁止「晚接早」
         for d in range(days-1): 
             model.Add(shifts[(n,d,2)] + shifts[(n,d+1,1)] <= 1)
         
-        # 4. 連續上班限制：任意 5 天內，工作天數(1,2) 不可超過 4 天 (即強制做4休1)
-        # 注意：這條規則很嚴格，容易造成排班失敗
+        # --- 3. 連續上班限制 (修正版) ---
+        # 規則：不強制一定要做四休一，但「不可連續上班 5 天」
+        # 邏輯：任意連續 5 天的區間內，上班天數總和 <= 4
+        # 結果：允許 11110 (四休一), 11101 (三休一上一), 但禁止 11111 (連五)
         for d in range(days-4): 
             model.Add(sum(shifts[(n,d+i,s)] for i in range(5) for s in [1,2]) <= 4)
-            
-        # 5. 每月總休假天數 >= 9 天 (若遇小月或請假過多可能會卡住，建議依需求調整)
-        model.Add(sum(shifts[(n,d,0)] for d in range(days)) >= 9)
 
-    # --- 目標函數 ---
-    model.Maximize(sum(priority_penalties))
-    
     # --- 求解 ---
+    model.Maximize(sum(priority_penalties))
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = 10.0 # 設定運算時間上限
+    solver.parameters.max_time_in_seconds = 10.0
     status = solver.Solve(model)
 
     if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
@@ -218,21 +233,19 @@ def generate_schedule(staff_df, start_date, days):
                 h = f"{d_obj.month}/{d_obj.day}({['一','二','三','四','五','六','日'][d_obj.weekday()]})"
                 
                 if solver.Value(shifts[(n,d_idx,1)]): 
-                    v = "A" # 早班
+                    v = "A"
                 elif solver.Value(shifts[(n,d_idx,2)]): 
-                    v = "B" # 晚班
+                    v = "B"
                 else:
-                    # 休假顯示邏輯
                     v = "/"
                     for label, d_list in req_offs_record[n].items():
                         if (d_idx + 1) in d_list: 
-                            v = label # 顯示指定的假別 (補/年)
-                            break
+                            v = label; break
                 row[h] = v
             res.append(row)
         return pd.DataFrame(res), None
     else:
-        return None, ["排班失敗：無法滿足所有硬性限制 (通常是人力不足、連上限制太嚴格或休假天數要求過高)。"]
+        return None, ["排班失敗：無法滿足限制 (可能原因：指定上班21天與人力需求衝突，或連續上班限制導致)。"]
 
 # --- 4. 執行按鈕 (包含除錯邏輯) ---
 if st.button("🚀 執行 AI 智慧排班"):
@@ -256,4 +269,4 @@ if st.button("🚀 執行 AI 智慧排班"):
             st.dataframe(final_df, use_container_width=True, height=500, hide_index=True)
         else:
             st.error(f"🚨 班表生成失敗：{diag[0]}")
-            st.warning("💡 提示：若人力數量足夠但仍失敗，請檢查是否「連續上班限制」太嚴格，或特定人員的休假造成排班死結。")
+            st.warning("💡 提示：若人力數量足夠但仍失敗，請檢查是否「連續上班限制」太嚴格。")
