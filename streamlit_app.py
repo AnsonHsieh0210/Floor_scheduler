@@ -4,6 +4,7 @@ from ortools.sat.python import cp_model
 from datetime import datetime, timedelta
 import re
 import os
+import random
 
 # --- 頁面配置 ---
 st.set_page_config(page_title="百貨櫃位智慧排班系統", layout="wide")
@@ -12,9 +13,9 @@ st.set_page_config(page_title="百貨櫃位智慧排班系統", layout="wide")
 SAVE_FILE = "staff_database.csv"
 
 def mask_name(name):
-    """將名字中間字變為 O 以保護隱私 (防止重複遮罩)"""
+    """將名字中間字變為 O 以保護隱私"""
     name = str(name).strip()
-    if "O" in name: return name # 已經遮過的就不再遮
+    if "O" in name: return name 
     if len(name) <= 2: return name[0] + "O"
     return name[0] + "O" + name[2:]
 
@@ -23,14 +24,13 @@ def load_data():
     if os.path.exists(SAVE_FILE):
         try: 
             df = pd.read_csv(SAVE_FILE, dtype={"員編": str})
-            # 清理可能存在的 "None" 字串
             df = df.replace(["None", "nan"], "")
             return df
         except: return get_default_df()
     return get_default_df()
 
 def get_default_df():
-    """預設的人員名單"""
+    """預設的人員名單 (新增指定班別欄位)"""
     raw_data = [
         {"員編": "800060", "姓名": "洪麗雯", "職稱": "資深經理"},
         {"員編": "800121", "姓名": "徐佩君", "職稱": "資深副理"},
@@ -44,22 +44,22 @@ def get_default_df():
         {"員編": "809183", "姓名": "林迪勝", "職稱": "專員"},
     ]
     df = pd.DataFrame(raw_data)
-    # 初始化欄位
-    for col in ["劃休(/)", "補休(補)", "年假(年)"]:
+    # 初始化欄位：除了休假，新增指定早班/晚班
+    for col in ["劃休(/)", "補休(補)", "年假(年)", "指定早班(A)", "指定晚班(B)"]:
         if col not in df.columns: df[col] = ""
     return df
 
-# 初始化 Session State
 if 'staff_df' not in st.session_state:
     st.session_state.staff_df = load_data()
 
-# --- 強制修復資料 (解決遮罩消失與 None 問題) ---
-# 每次執行都檢查一次，確保名字被遮罩，且 None 被清除
+# --- 強制修復資料 ---
 if not st.session_state.staff_df.empty:
-    # 1. 強制遮罩名字
     st.session_state.staff_df["姓名"] = st.session_state.staff_df["姓名"].apply(mask_name)
-    # 2. 清除 "None" 字串
     st.session_state.staff_df = st.session_state.staff_df.replace(["None", "nan"], "")
+    # 確保新欄位存在 (針對舊存檔的相容性)
+    for col in ["指定早班(A)", "指定晚班(B)"]:
+        if col not in st.session_state.staff_df.columns:
+            st.session_state.staff_df[col] = ""
 
 # --- CSS 樣式優化 ---
 st.markdown("""
@@ -80,9 +80,9 @@ with st.container():
     st.markdown("""
     <div class="rule-box">
         <h3 style='margin-top:0;'>📌 系統排班規則</h3>
-        <p>• <b>人力配置</b>：每日最低門檻 2A / 2B，並<b>盡量平衡早晚班人數</b>。<br>
+        <p>• <b>指定班別</b>：可於表格右側指定某日上 <b>早班(A)</b> 或 <b>晚班(B)</b>。<br>
         • <b>休假規則</b>：每人預設排班 <b>21 天</b> (若請假過多則自動調整)。<br>
-        • <b>人性化排班</b>：優先安排<b>連續班別</b>，減少 A/B 頻繁切換。<br>
+        • <b>人性化排班</b>：優先安排連續班別，並加入<b>隨機洗牌</b>。<br>
         • <b>連上限制</b>：不可連續上班 5 天 (即連上 4 天後必須休假)。</p>
     </div>
     """, unsafe_allow_html=True)
@@ -96,20 +96,28 @@ num_days = (next_month - timedelta(days=1)).day
 
 st.subheader("👥 人員資料管理")
 with st.form("staff_form"):
-    edited_staff = st.data_editor(st.session_state.staff_df, num_rows="dynamic", use_container_width=True, key="main_editor")
+    # 調整欄位順序，方便閱讀
+    cols = ["員編", "姓名", "職稱", "劃休(/)", "補休(補)", "年假(年)", "指定早班(A)", "指定晚班(B)"]
+    # 確保只顯示存在的欄位
+    display_cols = [c for c in cols if c in st.session_state.staff_df.columns]
+    
+    edited_staff = st.data_editor(
+        st.session_state.staff_df[display_cols], 
+        num_rows="dynamic", 
+        use_container_width=True, 
+        key="main_editor"
+    )
     submit_data = st.form_submit_button("💾 儲存並備份名單")
     if submit_data:
-        # 儲存前再次確保格式正確
         edited_staff = edited_staff.replace(["None", "nan"], "")
         st.session_state.staff_df = edited_staff
         edited_staff.to_csv(SAVE_FILE, index=False)
-        st.success("✅ 資料已同步儲存 (已自動修復格式)")
-        st.rerun() # 重新整理頁面以更新顯示
+        st.success("✅ 資料已同步儲存")
+        st.rerun()
 
 # --- 3. 核心邏輯函式 ---
 
 def parse_days(input_str):
-    """解析日期字串，過濾掉 None 或無效文字"""
     s = str(input_str).lower().strip()
     if s in ["none", "nan", "", "nat"]: return []
     parts = s.replace('，', ',').split(',')
@@ -148,24 +156,26 @@ def pre_check_feasibility(staff_df, start_date, days):
     return error_logs
 
 def generate_schedule(staff_df, start_date, days):
-    """AI 排班核心邏輯 (加入 A/B 班平衡 + 穩定度懲罰)"""
+    """AI 排班核心邏輯 (新增指定班別功能)"""
     model = cp_model.CpModel()
     names = staff_df["姓名"].tolist()
     dates = [start_date + timedelta(days=i) for i in range(days)]
     
-    # 變數定義：0=休假, 1=早班(A), 2=晚班(B)
     shifts = {(n, d, s): model.NewBoolVar(f's_{n}_{d}_{s}') for n in names for d in range(days) for s in [0,1,2]}
 
-    priority_rewards = []    # 獎勵分數 (滿足休假/平衡)
-    stability_penalties = [] # 懲罰分數 (混亂/不平衡)
+    priority_rewards = []    # 獎勵分數
+    stability_penalties = [] # 懲罰分數
+    random_noise = []        # 隨機擾動
     
     req_offs_record = {}
+    req_shifts_record = {} # [新增] 記錄指定班別
     
     for _, row in staff_df.iterrows():
         n = row["姓名"]
         req_offs_record[n] = {"/": parse_days(row["劃休(/)"]), "補": parse_days(row["補休(補)"]), "年": parse_days(row["年假(年)"])}
-        
-        # --- 上班天數 21 天邏輯 ---
+        req_shifts_record[n] = {"A": parse_days(row["指定早班(A)"]), "B": parse_days(row["指定晚班(B)"])}
+
+        # 1. 上班天數 21 天邏輯
         total_leaves = set(req_offs_record[n]["/"] + req_offs_record[n]["補"] + req_offs_record[n]["年"])
         valid_leaves = len([d for d in total_leaves if 1 <= d <= days])
         work_days_var = sum(shifts[(n,d,1)] + shifts[(n,d,2)] for d in range(days))
@@ -178,66 +188,85 @@ def generate_schedule(staff_df, start_date, days):
             model.Add(work_days_var >= target)
             model.Add(work_days_var <= target + 2)
 
-        # --- 休假優先權邏輯 ---
+        # 2. 休假優先權 (最高優先)
         is_p1 = ("洪O雯" in n)
         is_p2 = ("潘O誼" in n)
+        
+        # 為了避免衝突，先收集該員所有的休假日期
+        my_leave_days = []
         for label, d_list in req_offs_record[n].items():
             for d in d_list:
                 if 1 <= d <= days:
                     d_idx = d - 1
+                    my_leave_days.append(d)
                     if is_p1:
                         model.Add(shifts[(n, d_idx, 0)] == 1)
                     elif is_p2:
                         pref = model.NewBoolVar(f'pref_p2_{n}_{d}')
                         model.Add(shifts[(n, d_idx, 0)] == 1).OnlyEnforceIf(pref)
-                        model.Add(shifts[(n, d_idx, 0)] == 0).OnlyEnforceIf(pref.Not())
                         priority_rewards.append(pref * 100)
                     else:
                         pref = model.NewBoolVar(f'pref_n_{d}')
                         model.Add(shifts[(n, d_idx, 0)] == 1).OnlyEnforceIf(pref)
-                        model.Add(shifts[(n, d_idx, 0)] == 0).OnlyEnforceIf(pref.Not())
                         priority_rewards.append(pref * 1)
 
-    # --- 硬性限制與優化條件 ---
+        # 3. [新功能] 指定班別優先權 (A班/B班)
+        # 規則：如果那天已經劃休，則忽略指定班別 (休假 > 上班)
+        # 指定 A 班
+        for d in req_shifts_record[n]["A"]:
+            if 1 <= d <= days and d not in my_leave_days:
+                d_idx = d - 1
+                # 強制那天必須是早班 (1)
+                model.Add(shifts[(n, d_idx, 1)] == 1)
+        
+        # 指定 B 班
+        for d in req_shifts_record[n]["B"]:
+            if 1 <= d <= days and d not in my_leave_days:
+                d_idx = d - 1
+                # 強制那天必須是晚班 (2)
+                model.Add(shifts[(n, d_idx, 2)] == 1)
+
+        # 4. 隨機洗牌
+        for d in range(days):
+            for s in [1, 2]:
+                rand_weight = random.randint(-2, 2) 
+                random_noise.append(shifts[(n, d, s)] * rand_weight)
+
+    # --- 限制與優化 ---
     for d in range(days):
-        # 1. 每人每天只能一種狀態
         for n in names: 
             model.Add(sum(shifts[(n, d, s)] for s in [0,1,2]) == 1)
         
-        # 2. 每日人力下限 (2A 2B)
         count_a = sum(shifts[(n, d, 1)] for n in names)
         count_b = sum(shifts[(n, d, 2)] for n in names)
         model.Add(count_a >= 2) 
         model.Add(count_b >= 2) 
 
-        # 3. [新功能] 人力平衡機制：避免早晚班人數懸殊
-        # 邏輯：建立變數 diff = |count_a - count_b|，並懲罰 diff
+        # 平衡早晚班
         diff = model.NewIntVar(0, 10, f'diff_{d}')
         model.AddAbsEquality(diff, count_a - count_b)
-        # 懲罰係數設為 5，讓系統盡量拉平，但不會為了拉平而違反休假需求(100)
         stability_penalties.append(diff * 5)
 
     for n in names:
         for d in range(days-1): 
-            # 4. 絕對禁止晚接早 (B -> A)
+            # 禁止 B -> A
             model.Add(shifts[(n,d,2)] + shifts[(n,d+1,1)] <= 1)
             
-            # 5. 穩定性優化：懲罰 A -> B 的切換
+            # 連續性優化
             switch_a_to_b = model.NewBoolVar(f'switch_ab_{n}_{d}')
             model.Add(shifts[(n, d, 1)] + shifts[(n, d+1, 2)] == 2).OnlyEnforceIf(switch_a_to_b)
             model.Add(shifts[(n, d, 1)] + shifts[(n, d+1, 2)] < 2).OnlyEnforceIf(switch_a_to_b.Not())
             stability_penalties.append(switch_a_to_b * 20)
 
-        # 6. 連續上班限制 (不可連續上班 5 天)
+        # 連續上班限制 (不可連 5)
         for d in range(days-4): 
             model.Add(sum(shifts[(n,d+i,s)] for i in range(5) for s in [1,2]) <= 4)
 
     # --- 目標函數 ---
-    # 最大化 (休假滿意度 - 班別混亂 - 人力不均)
-    model.Maximize(sum(priority_rewards) - sum(stability_penalties))
+    model.Maximize(sum(priority_rewards) - sum(stability_penalties) + sum(random_noise))
     
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = 15.0 # 稍微增加時間讓它運算平衡
+    solver.parameters.max_time_in_seconds = 15.0
     status = solver.Solve(model)
 
     if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
@@ -250,16 +279,17 @@ def generate_schedule(staff_df, start_date, days):
                 elif solver.Value(shifts[(n,d_idx,2)]): v = "B"
                 else:
                     v = "/"
+                    # 顯示假別
                     for label, d_list in req_offs_record[n].items():
                         if (d_idx + 1) in d_list: v = label; break
                 row[h] = v
             res.append(row)
         return pd.DataFrame(res), None
     else:
-        return None, ["排班失敗：限制過於嚴格。請嘗試檢查是否有某天可用人力過少，導致無法平衡 A/B 班。"]
+        return None, ["排班失敗：限制過於嚴格。請檢查「指定班別」是否導致某天 A/B 班人數不足，或與休假衝突。"]
 
 # --- 4. 執行按鈕 ---
-if st.button("🚀 執行 AI 智慧排班"):
+if st.button("🚀 執行 AI 智慧排班 (每次點擊結果不同)"):
     with st.spinner("正在檢查人力配置..."):
         errors = pre_check_feasibility(st.session_state.staff_df, target_month, num_days)
     
@@ -268,11 +298,12 @@ if st.button("🚀 執行 AI 智慧排班"):
         for e in errors:
              st.markdown(f"<div class='error-box'>❌ {e}</div>", unsafe_allow_html=True)
     else:
-        with st.spinner("人力充足，正在優化班表連續性與平衡..."):
+        with st.spinner("正在進行運算 (加入隨機洗牌)..."):
             final_df, diag = generate_schedule(st.session_state.staff_df, target_month, num_days)
             
         if final_df is not None:
-            st.success("✅ 班表生成成功！(已優化：資料修復、人力平衡、減少A/B切換)")
+            st.success("✅ 班表生成成功！(已套用指定班別)")
             st.dataframe(final_df, use_container_width=True, height=500, hide_index=True)
+            st.info("💡 如果覺得這版的人員搭配不滿意，可以再按一次按鈕重新洗牌。")
         else:
             st.error(f"🚨 班表生成失敗：{diag[0]}")
